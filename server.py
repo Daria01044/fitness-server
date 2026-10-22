@@ -1,0 +1,748 @@
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import json
+import os
+import shutil
+from datetime import datetime, timedelta
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+# Хранилище активных подключений: {user_id: websocket}
+active_connections: Dict[int, WebSocket] = {}
+
+# Хранилище сообщений: {user_id: [{"from": "user"/"admin", "text": "...", "time": "..."}]}
+chat_messages: Dict[int, list] = {}
+
+app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from fastapi.staticfiles import StaticFiles
+
+# Папка для хранения данных на сервере (Amvera сохраняет её между перезапусками)
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        # Если файла нет, пробуем найти встроенный
+        bundled = "data.json"
+        if os.path.exists(bundled):
+            with open(bundled, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {"intro_workout": {}, "blocks": []}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return {"users": [], "current_user": None}
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_users(users_data):
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users_data, f, ensure_ascii=False, indent=2)
+
+
+def today_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+# --- Модели данных ---
+
+class WorkoutData(BaseModel):
+    intro_workout: Dict[str, Any]
+    blocks: List[Dict[str, Any]]
+
+
+class UserData(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    level: Optional[str] = None
+    intro_done: bool = False
+    current_block: Optional[int] = None
+    current_index: int = 0
+    done: Dict[str, bool] = {}
+    comments: Dict[str, str] = {}
+    done_dates: Dict[str, str] = {}
+    start_date: str
+    last_payment_date: str
+    payment_due_date: str
+    is_active: bool = True
+    payment_request: Optional[Dict[str, Any]] = None
+
+
+# --- API ---
+
+@app.get("/")
+def read_root():
+    return {"status": "ok", "service": "fitness-server"}
+
+
+@app.get("/data")
+def get_data():
+    """Отдаёт тренировки (data.json)."""
+    return load_data()
+
+
+@app.get("/users")
+def get_users():
+    """Отдаёт всех пользователей."""
+    return load_users()
+
+
+@app.post("/users")
+def update_users(users_data: Dict[str, Any]):
+    """Обновляет список пользователей (полная перезапись)."""
+    save_users(users_data)
+    return {"status": "ok"}
+
+
+@app.post("/user/register")
+def register_user(user: UserData):
+    """Регистрирует нового пользователя или возвращает существующего."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    # Ищем пользователя
+    for u in users:
+        if u["first_name"].lower() == user.first_name.lower() and u["last_name"].lower() == user.last_name.lower():
+            return {"status": "existing", "user": u}
+
+    # Создаём нового
+    now = datetime.now()
+    new_user = {
+        "id": len(users) + 1,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "level": None,
+        "intro_done": False,
+        "current_block": None,
+        "current_index": 0,
+        "done": {},
+        "comments": {},
+        "done_dates": {},
+        "start_date": now.strftime("%Y-%m-%d"),
+        "last_payment_date": now.strftime("%Y-%m-%d"),
+        "payment_due_date": (now + timedelta(days=7)).strftime("%Y-%m-%d"),
+        "is_active": True,
+        "payment_request": None,
+    }
+    users.append(new_user)
+    users_data["users"] = users
+    save_users(users_data)
+    return {"status": "created", "user": new_user}
+
+
+@app.post("/user/update")
+def update_user(user: UserData):
+    """Обновляет данные конкретного пользователя."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    for i, u in enumerate(users):
+        if u["id"] == user.id:
+            users[i] = user.dict()
+            save_users(users_data)
+            return {"status": "ok", "user": users[i]}
+
+    raise HTTPException(status_code=404, detail="User not found")
+
+
+@app.post("/user/payment_request")
+def create_payment_request(user_id: int):
+    """Создаёт заявку на оплату."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    for u in users:
+        if u["id"] == user_id:
+            u["payment_request"] = {
+                "requested_at": today_str(),
+                "status": "pending",
+            }
+            save_users(users_data)
+            return {"status": "ok", "user": u}
+
+    raise HTTPException(status_code=404, detail="User not found")
+
+
+@app.post("/user/approve_payment")
+def approve_payment(user_id: int):
+    """Подтверждает оплату (для админа)."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    for u in users:
+        if u["id"] == user_id:
+            now = datetime.now()
+            u["last_payment_date"] = now.strftime("%Y-%m-%d")
+            u["payment_due_date"] = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+            u["is_active"] = True
+            u["payment_request"] = None
+            save_users(users_data)
+            return {"status": "ok", "user": u}
+
+    raise HTTPException(status_code=404, detail="User not found")
+
+
+@app.post("/user/reject_payment")
+def reject_payment(user_id: int):
+    """Отклоняет оплату (для админа)."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    for u in users:
+        if u["id"] == user_id:
+            u["payment_request"] = None
+            save_users(users_data)
+            return {"status": "ok", "user": u}
+
+    raise HTTPException(status_code=404, detail="User not found")
+
+
+@app.post("/user/toggle_block")
+def toggle_block(user_id: int):
+    """Блокирует/разблокирует пользователя (для админа)."""
+    users_data = load_users()
+    users = users_data["users"]
+
+    for u in users:
+        if u["id"] == user_id:
+            u["is_active"] = not u.get("is_active", True)
+            save_users(users_data)
+            return {"status": "ok", "user": u}
+
+    raise HTTPException(status_code=404, detail="User not found")
+    
+@app.websocket("/ws/chat/{user_id}")
+async def websocket_chat(websocket: WebSocket, user_id: int):
+    await websocket.accept()
+    active_connections[user_id] = websocket
+
+    # Отправляем историю сообщений
+    history = chat_messages.get(user_id, [])
+    for msg in history:
+        await websocket.send_json(msg)
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            text = data.get("text", "").strip()
+            if not text:
+                continue
+
+            msg = {
+                "from": "user",
+                "text": text,
+                "time": today_str(),
+            }
+            chat_messages.setdefault(user_id, []).append(msg)
+
+            # Отправляем подтверждение пользователю
+            await websocket.send_json(msg)
+
+            # Отправляем сообщение админу (если он подключён)
+            if 0 in active_connections:
+                try:
+                    await active_connections[0].send_json({
+                        "from": "user",
+                        "user_id": user_id,
+                        "text": text,
+                        "time": today_str(),
+                    })
+                except Exception:
+                    pass
+
+    except WebSocketDisconnect:
+        if user_id in active_connections:
+            del active_connections[user_id]
+
+
+@app.websocket("/ws/admin")
+async def websocket_admin(websocket: WebSocket):
+    await websocket.accept()
+    active_connections[0] = websocket
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            user_id = data.get("user_id")
+            text = data.get("text", "").strip()
+
+            if not user_id or not text:
+                continue
+
+            msg = {
+                "from": "admin",
+                "text": text,
+                "time": today_str(),
+            }
+            chat_messages.setdefault(user_id, []).append(msg)
+
+            # Отправляем сообщение пользователю (если он онлайн)
+            if user_id in active_connections:
+                try:
+                    await active_connections[user_id].send_json(msg)
+                except Exception:
+                    pass
+
+    except WebSocketDisconnect:
+        if 0 in active_connections:
+            del active_connections[0]    
+            
+EXERCISES_FILE = os.path.join(DATA_DIR, "exercises.json")
+
+def load_exercises():
+    if not os.path.exists(EXERCISES_FILE):
+        return {"exercises": {}}
+    with open(EXERCISES_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_exercises(data):
+    with open(EXERCISES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/exercises")
+def get_exercises():
+    return load_exercises()
+
+
+@app.post("/exercises")
+def update_exercises(data: Dict[str, Any]):
+    save_exercises(data)
+    return {"status": "ok"}
+    
+@app.post("/workout/save")
+def save_workout(data: Dict[str, Any]):
+    """Добавляет или заменяет тренировку в блоке по номеру."""
+    block_id = data.get("block_id")
+    number = data.get("number")
+    text = data.get("text", "").strip()
+
+    if not block_id or not number or not text:
+        raise HTTPException(status_code=400, detail="Нужны block_id, number и text")
+
+    workouts_data = load_data()
+    blocks = workouts_data.get("blocks", [])
+
+    for block in blocks:
+        if block["id"] == block_id:
+            workouts = block.get("workouts", [])
+
+            # Ищем тренировку с таким номером
+            existing = None
+            for w in workouts:
+                if w["number"] == number:
+                    existing = w
+                    break
+
+            if existing:
+                existing["text"] = text
+                existing["video_url"] = data.get("video_url", "")
+                existing["audio_url"] = data.get("audio_url", "")
+                save_data(workouts_data)
+                return {"status": "replaced", "workout": existing}
+            else:
+                # Добавляем новую
+                new_id = block_id * 100 + number
+                days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница"]
+                day = days[(number - 1) % 5]
+
+                new_workout = {
+                    "id": new_id,
+                    "week": 1,
+                    "day": day,
+                    "number": number,
+                    "text": text,
+                    "video_url": data.get("video_url", ""),
+                    "audio_url": data.get("audio_url", ""),
+                }
+                workouts.append(new_workout)
+                # Сортируем по номеру
+                workouts.sort(key=lambda x: x["number"])
+                block["workouts"] = workouts
+                save_data(workouts_data)
+                return {"status": "created", "workout": new_workout}
+
+    raise HTTPException(status_code=404, detail="Block not found")
+
+
+@app.post("/workout/delete")
+def delete_workout(data: Dict[str, Any]):
+    """Удаляет тренировку из блока по номеру."""
+    block_id = data.get("block_id")
+    number = data.get("number")
+
+    if not block_id or not number:
+        raise HTTPException(status_code=400, detail="Нужны block_id и number")
+
+    workouts_data = load_data()
+    blocks = workouts_data.get("blocks", [])
+
+    for block in blocks:
+        if block["id"] == block_id:
+            workouts = block.get("workouts", [])
+            block["workouts"] = [w for w in workouts if w["number"] != number]
+            save_data(workouts_data)
+            return {"status": "ok"}
+
+    raise HTTPException(status_code=404, detail="Block not found")
+
+@app.post("/block/add")
+def add_block():
+    """Создаёт новый блок."""
+    workouts_data = load_data()
+    blocks = workouts_data.get("blocks", [])
+
+    # Определяем новый id
+    new_id = max([b["id"] for b in blocks], default=0) + 1
+
+    # Блоки 1–8 — beginner, 9+ — advanced
+    level = "beginner" if new_id <= 8 else "advanced"
+
+    new_block = {
+        "id": new_id,
+        "level": level,
+        "title": f"Блок {new_id}",
+        "free": False,
+        "image": "",
+        "workouts": [],
+    }
+
+    blocks.append(new_block)
+    workouts_data["blocks"] = blocks
+    save_data(workouts_data)
+
+    return {"status": "ok", "block": new_block}
+
+@app.post("/block/delete")
+def delete_block(data: Dict[str, Any]):
+    """Удаляет блок по id."""
+    block_id = data.get("block_id")
+    if not block_id:
+        raise HTTPException(status_code=400, detail="Нужен block_id")
+
+    workouts_data = load_data()
+    blocks = workouts_data.get("blocks", [])
+
+    blocks = [b for b in blocks if b["id"] != block_id]
+    workouts_data["blocks"] = blocks
+    save_data(workouts_data)
+
+    return {"status": "ok"}
+    
+@app.post("/exercise/add")
+def add_exercise(data: Dict[str, Any]):
+    """Добавляет новое упражнение с видео."""
+    name = data.get("name", "").strip()
+    video_url = data.get("video_url", "").strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Нужно название")
+
+    key = name.lower().strip().replace(" ", "_")
+
+    exercises_data = load_exercises()
+    exercises = exercises_data.get("exercises", {})
+
+    if key in exercises:
+        raise HTTPException(status_code=400, detail="Упражнение с таким названием уже есть")
+
+    exercises[key] = {
+        "name": name,
+        "video_url": video_url,
+        "description": "",
+    }
+
+    exercises_data["exercises"] = exercises
+    save_exercises(exercises_data)
+
+    return {"status": "ok", "key": key}
+
+
+@app.post("/exercise/delete")
+def delete_exercise(data: Dict[str, Any]):
+    """Удаляет упражнение."""
+    key = data.get("key", "").strip()
+
+    if not key:
+        raise HTTPException(status_code=400, detail="Нужен key")
+
+    exercises_data = load_exercises()
+    exercises = exercises_data.get("exercises", {})
+
+    if key in exercises:
+        del exercises[key]
+        exercises_data["exercises"] = exercises
+        save_exercises(exercises_data)
+        return {"status": "ok"}
+
+    raise HTTPException(status_code=404, detail="Упражнение не найдено")
+    
+@app.post("/intro/update")
+def update_intro(data: Dict[str, Any]):
+    """Обновляет вводную тренировку."""
+    workouts_data = load_data()
+    
+    if "intro_workout" not in workouts_data:
+        workouts_data["intro_workout"] = {}
+    
+    intro = workouts_data["intro_workout"]
+    
+    if "text" in data:
+        intro["text"] = data["text"]
+    if "video_url" in data:
+        intro["video_url"] = data["video_url"]
+    if "audio_url" in data:
+        intro["audio_url"] = data["audio_url"]
+    if "title" in data:
+        intro["title"] = data["title"]
+    
+    workouts_data["intro_workout"] = intro
+    save_data(workouts_data)
+    
+    return {"status": "ok", "intro": intro} 
+    
+@app.post("/exercise/rename")
+def rename_exercise(data: Dict[str, Any]):
+    """Переименовывает упражнение."""
+    key = data.get("key", "").strip()
+    new_name = data.get("new_name", "").strip()
+
+    if not key or not new_name:
+        raise HTTPException(status_code=400, detail="Нужны key и new_name")
+
+    exercises_data = load_exercises()
+    exercises = exercises_data.get("exercises", {})
+
+    if key not in exercises:
+        raise HTTPException(status_code=404, detail="Упражнение не найдено")
+
+    exercises[key]["name"] = new_name
+    exercises_data["exercises"] = exercises
+    save_exercises(exercises_data)
+
+    return {"status": "ok", "key": key, "new_name": new_name}    
+    
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.post("/upload/profile_photo")
+async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
+    """Загружает фото профиля."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Нет файла")
+    
+    # Сохраняем файл
+    ext = os.path.splitext(file.filename)[1] or ".jpg"
+    filename = f"user_{user_id}{ext}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    # Обновляем пользователя
+    users_data = load_users()
+    for u in users_data["users"]:
+        if u["id"] == user_id:
+            u["profile_photo"] = f"/uploads/{filename}"
+            break
+    save_users(users_data)
+    
+    return {"status": "ok", "path": f"/uploads/{filename}"}
+
+@app.post("/upload/exercise_video")
+async def upload_exercise_video(file: UploadFile = File(...), exercise_key: str = ""):
+    """Загружает видео для упражнения."""
+    if not file.filename or not exercise_key:
+        raise HTTPException(status_code=400, detail="Нужен файл и exercise_key")
+
+    ext = os.path.splitext(file.filename)[1].lower() or ".mp4"
+    video_exts = [".mp4", ".mov", ".webm", ".avi"]
+    if ext not in video_exts:
+        raise HTTPException(status_code=400, detail="Неподдерживаемый формат")
+
+    videos_dir = os.path.join(UPLOAD_DIR, "videos")
+    os.makedirs(videos_dir, exist_ok=True)
+
+    filename = f"{exercise_key}{ext}"
+    filepath = os.path.join(videos_dir, filename)
+
+    with open(filepath, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    url_path = f"/uploads/videos/{filename}"
+
+    return {"status": "ok", "path": url_path}
+
+@app.post("/upload/comment_media")
+async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Нет файла")
+
+    MAX_SIZE_MB = 50
+
+    ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
+    image_exts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"]
+    video_exts = [".mp4", ".mov", ".avi", ".webm", ".mkv", ".3gp"]
+
+    if ext in image_exts:
+        media_type = "image"
+    elif ext in video_exts:
+        media_type = "video"
+    else:
+        raise HTTPException(status_code=400, detail="Неподдерживаемый формат")
+
+    # Читаем и проверяем размер
+    content = await file.read()
+    if len(content) > MAX_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"Файл больше {MAX_SIZE_MB} МБ")
+
+    comments_dir = os.path.join(UPLOAD_DIR, "comments")
+    os.makedirs(comments_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"user_{user_id}_{timestamp}{ext}"
+    filepath = os.path.join(comments_dir, filename)
+
+    with open(filepath, "wb") as buffer:
+        buffer.write(content)
+
+    url_path = f"/uploads/comments/{filename}"
+
+    return {
+        "status": "ok",
+        "path": url_path,
+        "media_type": media_type,
+    }
+
+@app.get("/uploads/{filename}")
+async def get_upload(filename: str):
+    """Отдаёт загруженный файл."""
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return FileResponse(filepath)    
+    
+FOODS_FILE = os.path.join(DATA_DIR, "foods.json")
+
+def load_foods():
+    if not os.path.exists(FOODS_FILE):
+        return {"foods": []}
+    with open(FOODS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/foods")
+def get_foods():
+    return load_foods()
+
+INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.json")
+
+def load_inventory():
+    if not os.path.exists(INVENTORY_FILE):
+        return {"items": [], "note": ""}
+    with open(INVENTORY_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_inventory(data):
+    with open(INVENTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/inventory")
+def get_inventory():
+    return load_inventory()
+
+
+@app.post("/inventory")
+def update_inventory(data: Dict[str, Any]):
+    save_inventory(data)
+    return {"status": "ok"}    
+    
+class SetCurrentBlockRequest(BaseModel):
+    block_id: int
+
+
+@app.post("/block/set_current")
+async def set_current_block(req: SetCurrentBlockRequest):
+    data = load_data()
+    for b in data.get("blocks", []):
+        b["is_current"] = (b["id"] == req.block_id)
+    save_data(data)
+    return {"status": "ok"} 
+    
+class BonusWorkoutRequest(BaseModel):
+    id: int = 0
+    title: str = ""
+    text: str = ""
+    video_url: str = ""
+    audio_url: str = ""
+
+
+@app.post("/bonus/save")
+async def save_bonus_workout(req: BonusWorkoutRequest):
+    data = load_data()
+    bonus = data.setdefault("bonus_workouts", [])
+
+    if req.id:
+        # Редактирование
+        for bw in bonus:
+            if bw["id"] == req.id:
+                bw["title"] = req.title
+                bw["text"] = req.text
+                bw["video_url"] = req.video_url
+                bw["audio_url"] = req.audio_url
+                break
+    else:
+        # Новая
+        new_id = max([bw.get("id", 0) for bw in bonus], default=9000) + 1
+        bonus.append({
+            "id": new_id,
+            "title": req.title,
+            "text": req.text,
+            "video_url": req.video_url,
+            "audio_url": req.audio_url,
+        })
+
+    save_data(data)
+    return {"status": "ok"}
+
+
+@app.post("/bonus/delete")
+async def delete_bonus_workout(req: dict):
+    data = load_data()
+    bonus = data.get("bonus_workouts", [])
+    bid = req.get("id")
+    bonus = [bw for bw in bonus if bw.get("id") != bid]
+    data["bonus_workouts"] = bonus
+    save_data(data)
+    return {"status": "ok"}    

@@ -1,0 +1,94 @@
+{
+  "exercises": {
+    "приседания": {
+      "name": "Приседания",
+      "video_url": "https://vkvideo.ru/video-242113399_456239022",
+      "description": "Ноги на ширине плеч, спина прямая."
+    },
+    "отжимания": {
+      "name": "Отжимания",
+      "video_url": "https://vkvideo.ru/video-242113399_456239022",
+      "description": "Руки на ширине плеч, тело — прямая линия."
+    },
+    "скручивания": {
+      "name": "Скручивания",
+      "video_url": "https://vkvideo.ru/video-242113399_456239022",
+      "description": "Лёжа на спине, руки за головой, поднимай корпус."
+    },
+    "подъем_на_носки": {
+      "name": "Подъем на носки",
+      "video_url": "https://vkvideo.ru/video-242113399_456239022",
+      "description": ""
+    },
+    "отжимания_от_колен": {
+      "name": "Отжимания от колен",
+      "video_url": "https://vkvideo.ru/video-242113399_456239030",
+      "description": ""
+    },
+    "отжимания_волной": {
+      "name": "Отжимания волной",
+      "video_url": "https://vkvideo.ru/video-242113399_456239035",
+      "description": ""
+    },
+    "ослик_лягается": {
+      "name": "Ослик лягается",
+      "video_url": "https://vkvideo.ru/video-242113399_456239036",
+      "description": ""
+    },
+    "джампинг_джек_(джеки)": {
+      "name": "Джампинг Джек (Джеки)",
+      "video_url": "https://vkvideo.ru/video-242113399_456239038",
+      "description": ""
+    },
+    "выпрыгивания_из_седа": {
+      "name": "Выпрыгивания из седа",
+      "video_url": "https://vkvideo.ru/video-242113399_456239039",
+      "description": ""
+    },
+    "червячок": {
+      "name": "Червячок",
+      "video_url": "https://vkvideo.ru/video-242113399_456239040",
+      "description": ""
+    },
+    "динамическая_лодочка": {
+      "name": "Динамическая лодочка",
+      "video_url": "https://vkvideo.ru/video-242113399_456239041",
+      "description": ""
+    },
+    "складка": {
+      "name": "Складка",
+      "video_url": "https://vkvideo.ru/video-242113399_456239042",
+      "description": ""
+    },
+    "сит_ап": {
+      "name": "Сит ап",
+      "video_url": "https://vkvideo.ru/video-242113399_456239043",
+      "description": ""
+    },
+    "обратные_скручивания": {
+      "name": "Обратные скручивания",
+      "video_url": "https://vk.ru/clip-242113399_456239057",
+      "description": ""
+    },
+    "полная_планка": {
+      "name": "Полная планка",
+      "video_url": "https://vkvideo.ru/video-242113399_456239046",
+      "description": ""
+    },
+    "сит_ап_с_ногами_на_возвышенности": {
+      "name": "Сит ап с ногами на возвышенности",
+      "video_url": "https://vkvideo.ru/video-242113399_456239049",
+      "description": ""
+    },
+    "зашагивания_на_стену": {
+      "name": "Зашагивания на стену",
+      "video_url": "https://vkvideo.ru/video-242113399_456239050",
+      "description": ""
+    },
+    "вставание_с_колен": {
+      "name": "Вставание с колен",
+      "video_url": "https://vk.ru/clip-242113399_456239059",
+      "description": ""
+    }
+  }
+}
