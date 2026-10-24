@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
@@ -7,6 +7,12 @@ import shutil
 from datetime import datetime, timedelta
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi import Body
+
+# --- Ключ для защиты админских эндпоинтов ---
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "f7Kp2mQx9vN4bR8tL1wZ6yC3sH5jD0aE")
+
+PROTECTED_FIELDS = {"id", "device_id"}
 
 # Хранилище активных подключений: {user_id: websocket}
 active_connections: Dict[int, WebSocket] = {}
@@ -82,6 +88,7 @@ class UserData(BaseModel):
     id: Optional[int] = None
     first_name: str
     last_name: str
+    device_id: Optional[str] = None
     level: Optional[str] = None
     intro_done: bool = False
     current_block: Optional[int] = None
@@ -116,22 +123,43 @@ def get_users():
 
 
 @app.post("/users")
-def update_users(users_data: Dict[str, Any]):
-    """Обновляет список пользователей (полная перезапись)."""
+def update_users(users_data: Dict[str, Any], x_admin_key: Optional[str] = Header(None)):
+    """Обновляет список пользователей (полная перезапись). Требует ключ."""
+    if x_admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
     save_users(users_data)
     return {"status": "ok"}
 
-
 @app.post("/user/register")
 def register_user(user: UserData):
-    """Регистрирует нового пользователя или возвращает существующего."""
+    """Регистрирует нового пользователя или возвращает существующего (с проверкой device_id)."""
     users_data = load_users()
     users = users_data["users"]
 
-    # Ищем пользователя
+    device_id = (user.device_id or "").strip() or None
+
+    # Ищем пользователя по имени и фамилии
     for u in users:
         if u["first_name"].lower() == user.first_name.lower() and u["last_name"].lower() == user.last_name.lower():
-            return {"status": "existing", "user": u}
+            existing_device = u.get("device_id")
+
+            # 1. Если у ученицы ещё нет привязки — привязываем
+            if not existing_device:
+                if device_id:
+                    u["device_id"] = device_id
+                    save_users(users_data)
+                return {"status": "existing", "user": u}
+
+            # 2. Привязка совпала — входим
+            if device_id and existing_device == device_id:
+                return {"status": "existing", "user": u}
+
+            # 3. Пришёл пустой device_id — пускаем как есть (например, с ПК)
+            if not device_id:
+                return {"status": "existing", "user": u}
+
+            # 4. Не совпало — отказ
+            return {"status": "device_mismatch"}
 
     # Создаём нового
     now = datetime.now()
@@ -139,6 +167,7 @@ def register_user(user: UserData):
         "id": len(users) + 1,
         "first_name": user.first_name,
         "last_name": user.last_name,
+        "device_id": device_id,
         "level": None,
         "intro_done": False,
         "current_block": None,
@@ -159,16 +188,20 @@ def register_user(user: UserData):
 
 
 @app.post("/user/update")
-def update_user(user: UserData):
-    """Обновляет данные конкретного пользователя."""
-    users_data = load_users()
-    users = users_data["users"]
+def update_user(payload: Dict[str, Any] = Body(...)):
+    """Обновляет данные одной ученицы, не затирая остальные поля."""
+    uid = payload.get("id")
+    if uid is None:
+        raise HTTPException(status_code=400, detail="id required")
 
-    for i, u in enumerate(users):
-        if u["id"] == user.id:
-            users[i] = user.dict()
+    users_data = load_users()
+    for u in users_data["users"]:
+        if u["id"] == uid:
+            for k, v in payload.items():
+                if k not in PROTECTED_FIELDS:
+                    u[k] = v
             save_users(users_data)
-            return {"status": "ok", "user": users[i]}
+            return {"status": "ok", "user": u}
 
     raise HTTPException(status_code=404, detail="User not found")
 
@@ -746,3 +779,24 @@ async def delete_bonus_workout(req: dict):
     data["bonus_workouts"] = bonus
     save_data(data)
     return {"status": "ok"}    
+
+@app.delete("/user/{user_id}")
+def delete_user_endpoint(user_id: int):
+    users_data = load_users()
+    before = len(users_data["users"])
+    users_data["users"] = [u for u in users_data["users"] if u["id"] != user_id]
+    if len(users_data["users"]) == before:
+        raise HTTPException(status_code=404, detail="User not found")
+    save_users(users_data)
+    return {"status": "deleted"}
+
+
+@app.post("/user/{user_id}/reset_device")
+def reset_device(user_id: int):
+    users_data = load_users()
+    for u in users_data["users"]:
+        if u["id"] == user_id:
+            u["device_id"] = None
+            save_users(users_data)
+            return {"status": "ok"}
+    raise HTTPException(status_code=404, detail="User not found")
