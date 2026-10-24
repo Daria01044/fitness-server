@@ -79,7 +79,7 @@ class WorkoutData(BaseModel):
 
 
 class UserData(BaseModel):
-    id: int
+    id: Optional[int] = None
     first_name: str
     last_name: str
     level: Optional[str] = None
@@ -89,9 +89,9 @@ class UserData(BaseModel):
     done: Dict[str, bool] = {}
     comments: Dict[str, str] = {}
     done_dates: Dict[str, str] = {}
-    start_date: str
-    last_payment_date: str
-    payment_due_date: str
+    start_date: Optional[str] = None
+    last_payment_date: Optional[str] = None
+    payment_due_date: Optional[str] = None
     is_active: bool = True
     payment_request: Optional[Dict[str, Any]] = None
 
