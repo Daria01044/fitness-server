@@ -5,7 +5,12 @@ import json
 import os
 import shutil
 import subprocess
-import imageio_ffmpeg
+try:
+    import imageio_ffmpeg
+    HAS_FFMPEG = True
+except ImportError as e:
+    HAS_FFMPEG = False
+    print(f"[WARNING] imageio-ffmpeg не установлен: {e}")
 from datetime import datetime, timedelta
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -640,19 +645,31 @@ async def upload_exercise_video(file: UploadFile = File(...), exercise_key: str 
     return {"status": "ok", "path": url_path}
 
 def convert_to_mp4(input_path: str, output_path: str):
+    if not HAS_FFMPEG:
+        print("[FFMPEG ERROR] Нет imageio-ffmpeg")
+        return False
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         cmd = [
-            ffmpeg_exe, "-y", "-i", input_path,
-            "-vcodec", "libx264", "-acodec", "aac",
-            "-movflags", "faststart", output_path
+            ffmpeg_exe,
+            "-y",
+            "-i", input_path,
+            "-vf", "scale=720:-2",     # Уменьшаем разрешение до 720p
+            "-b:v", "1M",              # Битрейт 1 Мбит/с
+            "-vcodec", "libx264",
+            "-acodec", "aac",
+            "-movflags", "faststart",
+            output_path
         ]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Запускаем с таймаутом 60 секунд, чтобы не вешать сервер
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         return True
+    except subprocess.TimeoutExpired:
+        print("[FFMPEG ERROR] Конвертация превысила 60 секунд")
+        return False
     except Exception as e:
         print(f"[FFMPEG ERROR] {e}")
         return False
-
 @app.post("/upload/comment_media")
 async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if not file.filename:
