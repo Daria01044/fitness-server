@@ -654,22 +654,19 @@ def convert_to_mp4(input_path: str, output_path: str):
             ffmpeg_exe,
             "-y",
             "-i", input_path,
-            "-vf", "scale=720:-2",     # Уменьшаем разрешение до 720p
-            "-b:v", "1M",              # Битрейт 1 Мбит/с
-            "-vcodec", "libx264",
-            "-acodec", "aac",
+            "-c", "copy",           # Копируем кодеки без перекодирования (БЫСТРО)
             "-movflags", "faststart",
             output_path
         ]
-        # Запускаем с таймаутом 60 секунд, чтобы не вешать сервер
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
         return True
     except subprocess.TimeoutExpired:
-        print("[FFMPEG ERROR] Конвертация превысила 60 секунд")
+        print("[FFMPEG ERROR] Конвертация превысила 30 секунд")
         return False
     except Exception as e:
         print(f"[FFMPEG ERROR] {e}")
         return False
+        
 @app.post("/upload/comment_media")
 async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if not file.filename:
