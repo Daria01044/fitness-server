@@ -4,3 +4,4 @@ pydantic
 httpx
 python-multipart
 imageio-ffmpeg
+psycopg2-binary
