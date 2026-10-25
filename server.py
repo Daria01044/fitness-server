@@ -4,6 +4,8 @@ from typing import List, Optional, Dict, Any
 import json
 import os
 import shutil
+import subprocess
+import imageio_ffmpeg
 from datetime import datetime, timedelta
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -163,8 +165,10 @@ def register_user(user: UserData):
 
     # Создаём нового
     now = datetime.now()
+    # Безопасное вычисление нового ID
+    new_id = max([u["id"] for u in users], default=0) + 1
     new_user = {
-        "id": len(users) + 1,
+        "id": new_id,
         "first_name": user.first_name,
         "last_name": user.last_name,
         "device_id": device_id,
@@ -635,6 +639,20 @@ async def upload_exercise_video(file: UploadFile = File(...), exercise_key: str 
 
     return {"status": "ok", "path": url_path}
 
+def convert_to_mp4(input_path: str, output_path: str):
+    try:
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        cmd = [
+            ffmpeg_exe, "-y", "-i", input_path,
+            "-vcodec", "libx264", "-acodec", "aac",
+            "-movflags", "faststart", output_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        print(f"[FFMPEG ERROR] {e}")
+        return False
+
 @app.post("/upload/comment_media")
 async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if not file.filename:
@@ -662,11 +680,32 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     os.makedirs(comments_dir, exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    filename = f"user_{user_id}_{timestamp}{ext}"
-    filepath = os.path.join(comments_dir, filename)
+    
+    if media_type == "image":
+        # Фото просто сохраняем
+        filename = f"user_{user_id}_{timestamp}{ext}"
+        filepath = os.path.join(comments_dir, filename)
+        with open(filepath, "wb") as buffer:
+            buffer.write(content)
+    else:
+        # Видео сначала сохраняем во временный файл
+        temp_filename = f"temp_{user_id}_{timestamp}{ext}"
+        temp_filepath = os.path.join(comments_dir, temp_filename)
+        with open(temp_filepath, "wb") as buffer:
+            buffer.write(content)
 
-    with open(filepath, "wb") as buffer:
-        buffer.write(content)
+        # Конвертируем в MP4
+        filename = f"user_{user_id}_{timestamp}.mp4"  # Принудительно .mp4
+        filepath = os.path.join(comments_dir, filename)
+        
+        success = convert_to_mp4(temp_filepath, filepath)
+        
+        # Удаляем временный файл
+        if os.path.exists(temp_filepath):
+            os.remove(temp_filepath)
+            
+        if not success:
+            raise HTTPException(status_code=500, detail="Ошибка при конвертации видео")
 
     url_path = f"/uploads/comments/{filename}"
 
