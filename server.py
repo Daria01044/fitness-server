@@ -3,8 +3,11 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
 import os
+import psycopg2
 import shutil
 import subprocess
+import threading
+users_lock = threading.RLock()
 try:
     import imageio_ffmpeg
     HAS_FFMPEG = True
@@ -50,35 +53,115 @@ UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
+DATABASE_URL = os.environ.get("DATABASE_URL")
+print(f"[DB] DATABASE_URL={'ЕСТЬ' if DATABASE_URL else 'НЕТ (пусто)'}")
+print(f"[DB] USE_DB={bool(DATABASE_URL)}")
+
+if not DATABASE_URL:
+    print("[DB ERROR] Переменная DATABASE_URL не задана! Данные будут в файлах.")
+
+USE_DB = bool(DATABASE_URL)
+
+
+def _db_conn():
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+
+def kv_get(name, default=None):
+    conn = _db_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("select value from kv where name = %s", (name,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else default
+
+
+def kv_set(name, value):
+    conn = _db_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "insert into kv (name, value) values (%s, %s::jsonb) "
+                "on conflict (name) do update set value = excluded.value",
+                (name, json.dumps(value, ensure_ascii=False)),
+            )
+    finally:
+        conn.close()
+
+
+def _file_path(name):
+    return os.path.join(DATA_DIR, f"{name}.json")
+
+
+def store_load(name, default):
+    if USE_DB:
+        return kv_get(name, default)
+    path = _file_path(name)
+    if not os.path.exists(path):
+        return default
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def store_save(name, value):
+    if USE_DB:
+        kv_set(name, value)
+        return
+    tmp = _file_path(name) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(value, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _file_path(name))
+
+
+def init_store():
+    """Создаёт таблицу и переносит файлы из репозитория, если в базе их ещё нет."""
+    if not USE_DB:
+        return
+    conn = _db_conn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("create table if not exists kv (name text primary key, value jsonb not null)")
+    finally:
+        conn.close()
+    for name in ("data", "users", "exercises", "inventory"):
+        path = _file_path(name)
+        if os.path.exists(path) and kv_get(name, None) is None:
+            with open(path, "r", encoding="utf-8") as f:
+                kv_set(name, json.load(f))
+            print(f"[INIT] {name} загружен из файла в базу")
+
 
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        # Если файла нет, пробуем найти встроенный
-        bundled = "data.json"
-        if os.path.exists(bundled):
-            with open(bundled, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {"intro_workout": {}, "blocks": []}
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+    return store_load("data", {"intro_workout": {}, "blocks": []})
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
+    store_save("data", data)
 
 def load_users():
-    if not os.path.exists(USERS_FILE):
-        return {"users": [], "current_user": None}
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+    return store_load("users", {"users": [], "current_user": None})
 
 def save_users(users_data):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users_data, f, ensure_ascii=False, indent=2)
+    store_save("users", users_data)
 
+def load_exercises():
+    return store_load("exercises", {"exercises": {}})
+
+def save_exercises(data):
+    store_save("exercises", data)
+
+def load_inventory():
+    return store_load("inventory", {"items": [], "note": ""})
+
+def save_inventory(data):
+    store_save("inventory", data)
+
+
+try:
+    init_store()
+except Exception as e:
+    print(f"[INIT ERROR] {e}")
 
 def today_str():
     return datetime.now().strftime("%Y-%m-%d")
@@ -116,6 +199,10 @@ class UserData(BaseModel):
 def read_root():
     return {"status": "ok", "service": "fitness-server"}
 
+@app.get("/health")
+def health():
+    load_users()  # трогаем базу, чтобы Supabase не ушёл на паузу
+    return {"status": "ok"}    
 
 @app.get("/data")
 def get_data():
@@ -139,81 +226,74 @@ def update_users(users_data: Dict[str, Any], x_admin_key: Optional[str] = Header
 
 @app.post("/user/register")
 def register_user(user: UserData):
-    """Регистрирует нового пользователя или возвращает существующего (с проверкой device_id)."""
-    users_data = load_users()
-    users = users_data["users"]
-
     device_id = (user.device_id or "").strip() or None
 
-    # Ищем пользователя по имени и фамилии
-    for u in users:
-        if u["first_name"].lower() == user.first_name.lower() and u["last_name"].lower() == user.last_name.lower():
-            existing_device = u.get("device_id")
+    with users_lock:
+        users_data = load_users()
+        users = users_data["users"]
 
-            # 1. Если у ученицы ещё нет привязки — привязываем
-            if not existing_device:
-                if device_id:
-                    u["device_id"] = device_id
-                    save_users(users_data)
-                return {"status": "existing", "user": u}
+        for u in users:
+            if u["first_name"].lower() == user.first_name.lower() and u["last_name"].lower() == user.last_name.lower():
+                existing_device = u.get("device_id")
 
-            # 2. Привязка совпала — входим
-            if device_id and existing_device == device_id:
-                return {"status": "existing", "user": u}
+                if not existing_device:
+                    if device_id:
+                        u["device_id"] = device_id
+                        save_users(users_data)
+                    return {"status": "existing", "user": u}
 
-            # 3. Пришёл пустой device_id — пускаем как есть (например, с ПК)
-            if not device_id:
-                return {"status": "existing", "user": u}
+                if device_id and existing_device == device_id:
+                    return {"status": "existing", "user": u}
 
-            # 4. Не совпало — отказ
-            return {"status": "device_mismatch"}
+                return {"status": "device_mismatch"}
 
-    # Создаём нового
-    now = datetime.now()
-    # Безопасное вычисление нового ID
-    new_id = max([u["id"] for u in users], default=0) + 1
-    new_user = {
-        "id": new_id,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "device_id": device_id,
-        "level": None,
-        "intro_done": False,
-        "current_block": None,
-        "current_index": 0,
-        "done": {},
-        "comments": {},
-        "done_dates": {},
-        "start_date": now.strftime("%Y-%m-%d"),
-        "last_payment_date": now.strftime("%Y-%m-%d"),
-        "payment_due_date": (now + timedelta(days=7)).strftime("%Y-%m-%d"),
-        "is_active": True,
-        "payment_request": None,
-    }
-    users.append(new_user)
-    users_data["users"] = users
-    save_users(users_data)
-    return {"status": "created", "user": new_user}
+        now = datetime.now()
+        new_id = max([u["id"] for u in users], default=0) + 1
+        new_user = {
+            "id": new_id,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "device_id": device_id,
+            "level": None,
+            "intro_done": False,
+            "current_block": None,
+            "current_index": 0,
+            "done": {},
+            "comments": {},
+            "done_dates": {},
+            "start_date": now.strftime("%Y-%m-%d"),
+            "last_payment_date": now.strftime("%Y-%m-%d"),
+            "payment_due_date": (now + timedelta(days=7)).strftime("%Y-%m-%d"),
+            "is_active": True,
+            "payment_request": None,
+        }
+        users.append(new_user)
+        save_users(users_data)
+        return {"status": "created", "user": new_user}
 
+
+ADMIN_ONLY_FIELDS = {"is_active", "payment_due_date", "last_payment_date", "start_date"}
+
+def is_admin_request(key):
+    return bool(ADMIN_KEY) and key == ADMIN_KEY
 
 @app.post("/user/update")
 def update_user(payload: Dict[str, Any] = Body(...)):
-    """Обновляет данные одной ученицы, не затирая остальные поля."""
     uid = payload.get("id")
     if uid is None:
         raise HTTPException(status_code=400, detail="id required")
 
-    users_data = load_users()
-    for u in users_data["users"]:
-        if u["id"] == uid:
-            for k, v in payload.items():
-                if k not in PROTECTED_FIELDS:
-                    u[k] = v
-            save_users(users_data)
-            return {"status": "ok", "user": u}
+    with users_lock:
+        users_data = load_users()
+        for u in users_data["users"]:
+            if u["id"] == uid:
+                for k, v in payload.items():
+                    if k not in PROTECTED_FIELDS:
+                        u[k] = v
+                save_users(users_data)
+                return {"status": "ok", "user": u}
 
     raise HTTPException(status_code=404, detail="User not found")
-
 
 @app.post("/user/payment_request")
 def create_payment_request(user_id: int):
@@ -324,7 +404,6 @@ async def websocket_chat(websocket: WebSocket, user_id: int):
         if user_id in active_connections:
             del active_connections[user_id]
 
-
 @app.websocket("/ws/admin")
 async def websocket_admin(websocket: WebSocket):
     await websocket.accept()
@@ -358,17 +437,6 @@ async def websocket_admin(websocket: WebSocket):
             del active_connections[0]    
             
 EXERCISES_FILE = os.path.join(DATA_DIR, "exercises.json")
-
-def load_exercises():
-    if not os.path.exists(EXERCISES_FILE):
-        return {"exercises": {}}
-    with open(EXERCISES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_exercises(data):
-    with open(EXERCISES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
 
 @app.get("/exercises")
 def get_exercises():
@@ -611,12 +679,13 @@ async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
         shutil.copyfileobj(file.file, buffer)
     
     # Обновляем пользователя
-    users_data = load_users()
-    for u in users_data["users"]:
-        if u["id"] == user_id:
-            u["profile_photo"] = f"/uploads/{filename}"
-            break
-    save_users(users_data)
+    with users_lock:
+        users_data = load_users()
+        for u in users_data["users"]:
+            if u["id"] == user_id:
+                u["profile_photo"] = f"/uploads/{filename}"
+                break
+        save_users(users_data)
     
     return {"status": "ok", "path": f"/uploads/{filename}"}
 
@@ -752,18 +821,6 @@ def get_foods():
 
 INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.json")
 
-def load_inventory():
-    if not os.path.exists(INVENTORY_FILE):
-        return {"items": [], "note": ""}
-    with open(INVENTORY_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_inventory(data):
-    with open(INVENTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @app.get("/inventory")
 def get_inventory():
     return load_inventory()
@@ -835,21 +892,24 @@ async def delete_bonus_workout(req: dict):
 
 @app.delete("/user/{user_id}")
 def delete_user_endpoint(user_id: int):
-    users_data = load_users()
-    before = len(users_data["users"])
-    users_data["users"] = [u for u in users_data["users"] if u["id"] != user_id]
-    if len(users_data["users"]) == before:
-        raise HTTPException(status_code=404, detail="User not found")
-    save_users(users_data)
+    with users_lock:
+        users_data = load_users()
+        before = len(users_data["users"])
+        users_data["users"] = [u for u in users_data["users"] if u["id"] != user_id]
+        if len(users_data["users"]) == before:
+            raise HTTPException(status_code=404, detail="User not found")
+        save_users(users_data)
     return {"status": "deleted"}
 
 
 @app.post("/user/{user_id}/reset_device")
 def reset_device(user_id: int):
-    users_data = load_users()
-    for u in users_data["users"]:
-        if u["id"] == user_id:
-            u["device_id"] = None
-            save_users(users_data)
-            return {"status": "ok"}
+    with users_lock:
+        users_data = load_users()
+        for u in users_data["users"]:
+            if u["id"] == user_id:
+                u["device_id"] = None
+                save_users(users_data)
+                return {"status": "ok"}
     raise HTTPException(status_code=404, detail="User not found")
+    
