@@ -851,7 +851,9 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     filename_in_cloud = f"comments/{filename}"
     content_type = "video/mp4" if media_type == "video" else "image/jpeg"
     
+    print(f"[DEBUG] Перед вызовом upload_to_supabase: {filename_in_cloud}")   # ← ДОБАВИТЬ
     public_url = upload_to_supabase(file_bytes, filename_in_cloud, content_type)
+    print(f"[DEBUG] После upload_to_supabase: public_url={public_url}")       # ← ДОБАВИТЬ
     
     if public_url:
         # Удаляем локальный файл (он больше не нужен)
