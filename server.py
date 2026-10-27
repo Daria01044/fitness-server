@@ -784,19 +784,17 @@ def load_foods():
     with open(FOODS_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 @app.get("/foods")
 def get_foods():
     return load_foods()
 
 INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.json")
 
-@app.get("/inventory", dependencies=[Depends(verify_admin)])
+@app.get("/inventory")
 def get_inventory():
     return load_inventory()
 
-
-@app.post("/inventory")
+@app.post("/inventory", dependencies=[Depends(verify_admin)])
 def update_inventory(data: Dict[str, Any]):
     save_inventory(data)
     return {"status": "ok"}    
