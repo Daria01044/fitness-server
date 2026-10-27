@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+from supabase import create_client, Client
 import json
 import os
 import psycopg2
@@ -23,6 +24,17 @@ from fastapi import Body
 
 ADMIN_KEY = os.environ.get("ADMIN_KEY")
 ADMIN_PIN = os.environ.get("ADMIN_PIN")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_BUCKET = "fitness"
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("[STORAGE] Supabase Storage подключен")
+else:
+    print("[STORAGE] ВНИМАНИЕ: SUPABASE_URL/KEY не заданы, файлы будут на диске")
 
 def verify_admin(x_admin_key: str = Header(None)):
     if x_admin_key != ADMIN_KEY:
@@ -636,32 +648,48 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @app.post("/upload/profile_photo")
 async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
-    """Загружает фото профиля."""
+    """Загружает фото профиля (в Supabase Storage, с фолбэком на диск)."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="Нет файла")
     
-    # Сохраняем файл
     ext = os.path.splitext(file.filename)[1] or ".jpg"
-    filename = f"user_{user_id}{ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
+    filename = f"profiles/user_{user_id}{ext}"
+    content = await file.read()
     
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Пытаемся загрузить в Supabase
+    public_url = None
+    if supabase:
+        try:
+            supabase.storage.from_(SUPABASE_BUCKET).upload(
+                path=filename,
+                file=content,
+                file_options={"content-type": file.content_type or "image/jpeg", "upsert": "true"}
+            )
+            public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+        except Exception as e:
+            print(f"[STORAGE ERROR] upload_profile_photo: {e}")
     
-    # Обновляем пользователя
+    # Обновляем пользователя (сохраняем либо полный URL, либо локальный путь)
     with users_lock:
         users_data = load_users()
         for u in users_data["users"]:
             if u["id"] == user_id:
-                u["profile_photo"] = f"/uploads/{filename}"
+                u["profile_photo"] = public_url if public_url else f"/uploads/{filename}"
                 break
         save_users(users_data)
     
-    return {"status": "ok", "path": f"/uploads/{filename}"}
+    # Если Supabase не сработал — сохраняем на диск
+    if not public_url:
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        with open(filepath, "wb") as buffer:
+            buffer.write(content)
+        return {"status": "ok", "path": f"/uploads/{filename}"}
+    
+    return {"status": "ok", "path": public_url}
 
-@app.post("/upload/exercise_video")
+@app.post("/upload/exercise_video", dependencies=[Depends(verify_admin)])
 async def upload_exercise_video(file: UploadFile = File(...), exercise_key: str = ""):
-    """Загружает видео для упражнения."""
+    """Загружает видео для упражнения (в Supabase Storage, с фолбэком на диск)."""
     if not file.filename or not exercise_key:
         raise HTTPException(status_code=400, detail="Нужен файл и exercise_key")
 
@@ -670,18 +698,42 @@ async def upload_exercise_video(file: UploadFile = File(...), exercise_key: str 
     if ext not in video_exts:
         raise HTTPException(status_code=400, detail="Неподдерживаемый формат")
 
-    videos_dir = os.path.join(UPLOAD_DIR, "videos")
-    os.makedirs(videos_dir, exist_ok=True)
-
+    content = await file.read()
+    
+    # Имя файла в облаке (или на диске)
     filename = f"{exercise_key}{ext}"
-    filepath = os.path.join(videos_dir, filename)
-
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    url_path = f"/uploads/videos/{filename}"
-
-    return {"status": "ok", "path": url_path}
+    filename_in_cloud = f"videos/{filename}"
+    content_type = "video/mp4" if ext == ".mp4" else "video/quicktime" if ext == ".mov" else "video/webm"
+    
+    # Пытаемся загрузить в Supabase
+    public_url = upload_to_supabase(content, filename_in_cloud, content_type)
+    
+    if public_url:
+        # Сохраняем полный URL в exercises.json
+        exercises_data = load_exercises()
+        exercises = exercises_data.get("exercises", {})
+        if exercise_key in exercises:
+            exercises[exercise_key]["video_file"] = public_url
+            exercises_data["exercises"] = exercises
+            save_exercises(exercises_data)
+        return {"status": "ok", "path": public_url}
+    else:
+        # Фолбэк на диск
+        videos_dir = os.path.join(UPLOAD_DIR, "videos")
+        os.makedirs(videos_dir, exist_ok=True)
+        filepath = os.path.join(videos_dir, filename)
+        with open(filepath, "wb") as buffer:
+            buffer.write(content)
+        
+        # Сохраняем локальный путь в exercises.json
+        exercises_data = load_exercises()
+        exercises = exercises_data.get("exercises", {})
+        if exercise_key in exercises:
+            exercises[exercise_key]["video_file"] = f"/uploads/videos/{filename}"
+            exercises_data["exercises"] = exercises
+            save_exercises(exercises_data)
+        
+        return {"status": "ok", "path": f"/uploads/videos/{filename}"}
 
 def convert_to_mp4(input_path: str, output_path: str):
     if not HAS_FFMPEG:
@@ -705,14 +757,47 @@ def convert_to_mp4(input_path: str, output_path: str):
     except Exception as e:
         print(f"[FFMPEG ERROR] {e}")
         return False
+
+def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
+    """Загружает файл в Supabase Storage и возвращает публичный URL."""
+    if not supabase:
+        return None
+    try:
+        # Загружаем файл в bucket
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            path=filename,
+            file=file_bytes,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        # Получаем публичную ссылку
+        public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+        return public_url
+    except Exception as e:
+        print(f"[STORAGE ERROR] {e}")
+        return None
         
+def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
+    """Загружает файл в Supabase Storage и возвращает публичный URL."""
+    if not supabase:
+        return None
+    try:
+        supabase.storage.from_(SUPABASE_BUCKET).upload(
+            path=filename,
+            file=file_bytes,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+    except Exception as e:
+        print(f"[STORAGE ERROR] {e}")
+        return None
+
+
 @app.post("/upload/comment_media")
 async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if not file.filename:
         raise HTTPException(status_code=400, detail="Нет файла")
 
     MAX_SIZE_MB = 50
-
     ext = os.path.splitext(file.filename)[1].lower() or ".jpg"
     image_exts = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"]
     video_exts = [".mp4", ".mov", ".avi", ".webm", ".mkv", ".3gp"]
@@ -724,7 +809,6 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     else:
         raise HTTPException(status_code=400, detail="Неподдерживаемый формат")
 
-    # Читаем и проверяем размер
     content = await file.read()
     if len(content) > MAX_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"Файл больше {MAX_SIZE_MB} МБ")
@@ -735,32 +819,44 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     
     if media_type == "image":
-        # Фото просто сохраняем
         filename = f"user_{user_id}_{timestamp}{ext}"
         filepath = os.path.join(comments_dir, filename)
         with open(filepath, "wb") as buffer:
             buffer.write(content)
     else:
-        # Видео сначала сохраняем во временный файл
+        # Конвертируем видео
         temp_filename = f"temp_{user_id}_{timestamp}{ext}"
         temp_filepath = os.path.join(comments_dir, temp_filename)
         with open(temp_filepath, "wb") as buffer:
             buffer.write(content)
 
-        # Конвертируем в MP4
-        filename = f"user_{user_id}_{timestamp}.mp4"  # Принудительно .mp4
+        filename = f"user_{user_id}_{timestamp}.mp4"
         filepath = os.path.join(comments_dir, filename)
         
         success = convert_to_mp4(temp_filepath, filepath)
         
-        # Удаляем временный файл
         if os.path.exists(temp_filepath):
             os.remove(temp_filepath)
             
         if not success:
             raise HTTPException(status_code=500, detail="Ошибка при конвертации видео")
 
-    url_path = f"/uploads/comments/{filename}"
+    # Загружаем в Supabase
+    with open(filepath, "rb") as f:
+        file_bytes = f.read()
+    
+    filename_in_cloud = f"comments/{filename}"
+    content_type = "video/mp4" if media_type == "video" else "image/jpeg"
+    
+    public_url = upload_to_supabase(file_bytes, filename_in_cloud, content_type)
+    
+    if public_url:
+        # Удаляем локальный файл (он больше не нужен)
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        url_path = public_url
+    else:
+        url_path = f"/uploads/comments/{filename}"
 
     return {
         "status": "ok",
