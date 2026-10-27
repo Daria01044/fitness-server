@@ -844,6 +844,22 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
         if not success:
             raise HTTPException(status_code=500, detail="Ошибка при конвертации видео")
 
+        # Генерируем превью (обложку) для видео
+        thumb_filename = f"thumb_{filename.replace('.mp4', '.jpg')}"
+        thumb_filepath = os.path.join(comments_dir, thumb_filename)
+        
+        try:
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            # Извлекаем 1-й кадр (или кадр на 1-й секунде)
+            subprocess.run([
+                ffmpeg_exe, "-y", "-i", filepath, 
+                "-ss", "00:00:01.000", "-vframes", "1", 
+                thumb_filepath
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except Exception as e:
+            print(f"[THUMB ERROR] {e}")
+            thumb_filepath = None
+
     # Загружаем в Supabase
     with open(filepath, "rb") as f:
         file_bytes = f.read()
@@ -865,9 +881,22 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
 
     return {
         "status": "ok",
-        "path": url_path,
+        "path": url_path,             # ссылка на видео
+        "thumb_path": thumb_public_url, # ссылка на обложку
         "media_type": media_type,
     }
+
+    # Загружаем видео в Supabase (этот код уже есть)
+    public_url = upload_to_supabase(...)
+    
+    # Загружаем обложку в Supabase
+    thumb_public_url = None
+    if thumb_filepath and os.path.exists(thumb_filepath):
+        with open(thumb_filepath, "rb") as f:
+            thumb_bytes = f.read()
+        thumb_cloud_name = f"comments/{thumb_filename}"
+        thumb_public_url = upload_to_supabase(thumb_bytes, thumb_cloud_name, "image/jpeg")
+        os.remove(thumb_filepath) # чистим диск    
 
 @app.get("/uploads/{filename}")
 async def get_upload(filename: str):
