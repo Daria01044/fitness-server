@@ -6,6 +6,8 @@ import os
 import psycopg2
 import shutil
 import subprocess
+import hmac
+import time
 import threading
 users_lock = threading.RLock()
 try:
@@ -19,9 +21,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import Body
 
-# --- Ключ для защиты админских эндпоинтов ---
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "f7Kp2mQx9vN4bR8tL1wZ6yC3sH5jD0aE")
-ADMIN_PIN = "1221"  # ← Поменяйте на любой удобный 4-значный код
+ADMIN_KEY = os.environ.get("ADMIN_KEY")
+ADMIN_PIN = os.environ.get("ADMIN_PIN")
 
 PROTECTED_FIELDS = {"id", "device_id"}
 
@@ -296,78 +297,23 @@ def update_user(payload: Dict[str, Any] = Body(...)):
 
     raise HTTPException(status_code=404, detail="User not found")
 
-@app.post("/user/payment_request")
-def create_payment_request(user_id: int):
-    """Создаёт заявку на оплату."""
-    users_data = load_users()
-    users = users_data["users"]
-
-    for u in users:
-        if u["id"] == user_id:
-            u["payment_request"] = {
-                "requested_at": today_str(),
-                "status": "pending",
-            }
-            save_users(users_data)
-            return {"status": "ok", "user": u}
-
-    raise HTTPException(status_code=404, detail="User not found")
-
-
-@app.post("/user/approve_payment")
-def approve_payment(user_id: int):
-    """Подтверждает оплату (для админа)."""
-    users_data = load_users()
-    users = users_data["users"]
-
-    for u in users:
-        if u["id"] == user_id:
-            now = datetime.now()
-            u["last_payment_date"] = now.strftime("%Y-%m-%d")
-            u["payment_due_date"] = (now + timedelta(days=30)).strftime("%Y-%m-%d")
-            u["is_active"] = True
-            u["payment_request"] = None
-            save_users(users_data)
-            return {"status": "ok", "user": u}
-
-    raise HTTPException(status_code=404, detail="User not found")
-
-
-@app.post("/user/reject_payment")
-def reject_payment(user_id: int):
-    """Отклоняет оплату (для админа)."""
-    users_data = load_users()
-    users = users_data["users"]
-
-    for u in users:
-        if u["id"] == user_id:
-            u["payment_request"] = None
-            save_users(users_data)
-            return {"status": "ok", "user": u}
-
-    raise HTTPException(status_code=404, detail="User not found")
+_login_fails = {"count": 0, "until": 0.0}
 
 @app.post("/admin/login")
 def admin_login(data: Dict[str, Any] = Body(...)):
-    """Проверяет PIN-код администратора."""
-    pin = data.get("pin", "")
-    if pin == ADMIN_PIN:
-        return {"status": "ok"}
+    """Проверяет PIN-код администратора и отдаёт ключ."""
+    now = time.time()
+    if now < _login_fails["until"]:
+        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите")
+    pin = str(data.get("pin", ""))
+    if ADMIN_PIN and ADMIN_KEY and hmac.compare_digest(pin, ADMIN_PIN):
+        _login_fails["count"] = 0
+        return {"status": "ok", "key": ADMIN_KEY}
+    _login_fails["count"] += 1
+    if _login_fails["count"] >= 5:
+        _login_fails["until"] = now + 300
+        _login_fails["count"] = 0
     raise HTTPException(status_code=403, detail="Неверный PIN-код")
-
-@app.post("/user/toggle_block")
-def toggle_block(user_id: int):
-    """Блокирует/разблокирует пользователя (для админа)."""
-    users_data = load_users()
-    users = users_data["users"]
-
-    for u in users:
-        if u["id"] == user_id:
-            u["is_active"] = not u.get("is_active", True)
-            save_users(users_data)
-            return {"status": "ok", "user": u}
-
-    raise HTTPException(status_code=404, detail="User not found")
     
 @app.websocket("/ws/chat/{user_id}")
 async def websocket_chat(websocket: WebSocket, user_id: int):
