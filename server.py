@@ -773,6 +773,7 @@ def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
         )
         # Получаем публичную ссылку
         public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
+        print(f"[STORAGE OK] {public_url}")
         return public_url
     except Exception as e:
         print(f"[STORAGE ERROR] {e}")
