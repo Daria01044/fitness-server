@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Header, Depends
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import json
@@ -23,6 +23,10 @@ from fastapi import Body
 
 ADMIN_KEY = os.environ.get("ADMIN_KEY")
 ADMIN_PIN = os.environ.get("ADMIN_PIN")
+
+def verify_admin(x_admin_key: str = Header(None)):
+    if x_admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden: admin key required")
 
 PROTECTED_FIELDS = {"id", "device_id"}
 
@@ -279,19 +283,31 @@ ADMIN_ONLY_FIELDS = {"is_active", "payment_due_date", "last_payment_date", "star
 def is_admin_request(key):
     return bool(ADMIN_KEY) and key == ADMIN_KEY
 
+ADMIN_ONLY_FIELDS = {"is_active", "payment_due_date", "last_payment_date", "start_date"}
+
 @app.post("/user/update")
-def update_user(payload: Dict[str, Any] = Body(...)):
+def update_user(
+    payload: Dict[str, Any] = Body(...),
+    x_admin_key: Optional[str] = Header(None)
+):
     uid = payload.get("id")
     if uid is None:
         raise HTTPException(status_code=400, detail="id required")
+
+    is_admin = (x_admin_key == ADMIN_KEY)
 
     with users_lock:
         users_data = load_users()
         for u in users_data["users"]:
             if u["id"] == uid:
                 for k, v in payload.items():
-                    if k not in PROTECTED_FIELDS:
-                        u[k] = v
+                    # Защищенные поля: id, device_id — никогда
+                    if k in PROTECTED_FIELDS:
+                        continue
+                    # Админские поля: только с ключом
+                    if k in ADMIN_ONLY_FIELDS and not is_admin:
+                        continue
+                    u[k] = v
                 save_users(users_data)
                 return {"status": "ok", "user": u}
 
@@ -397,12 +413,12 @@ def get_exercises():
     return load_exercises()
 
 
-@app.post("/exercises")
+@app.post("/exercises", dependencies=[Depends(verify_admin)])
 def update_exercises(data: Dict[str, Any]):
     save_exercises(data)
     return {"status": "ok"}
     
-@app.post("/workout/save")
+@app.post("/workout/save", dependencies=[Depends(verify_admin)])
 def save_workout(data: Dict[str, Any]):
     """Добавляет или заменяет тренировку в блоке по номеру."""
     block_id = data.get("block_id")
@@ -457,7 +473,7 @@ def save_workout(data: Dict[str, Any]):
     raise HTTPException(status_code=404, detail="Block not found")
 
 
-@app.post("/workout/delete")
+@app.post("/workout/delete", dependencies=[Depends(verify_admin)])
 def delete_workout(data: Dict[str, Any]):
     """Удаляет тренировку из блока по номеру."""
     block_id = data.get("block_id")
@@ -478,7 +494,7 @@ def delete_workout(data: Dict[str, Any]):
 
     raise HTTPException(status_code=404, detail="Block not found")
 
-@app.post("/block/add")
+@app.post("/block/add", dependencies=[Depends(verify_admin)])
 def add_block():
     """Создаёт новый блок."""
     workouts_data = load_data()
@@ -505,7 +521,7 @@ def add_block():
 
     return {"status": "ok", "block": new_block}
 
-@app.post("/block/delete")
+@app.post("/block/delete", dependencies=[Depends(verify_admin)])
 def delete_block(data: Dict[str, Any]):
     """Удаляет блок по id."""
     block_id = data.get("block_id")
@@ -521,7 +537,7 @@ def delete_block(data: Dict[str, Any]):
 
     return {"status": "ok"}
     
-@app.post("/exercise/add")
+@app.post("/exercise/add", dependencies=[Depends(verify_admin)])
 def add_exercise(data: Dict[str, Any]):
     """Добавляет новое упражнение с видео."""
     name = data.get("name", "").strip()
@@ -550,7 +566,7 @@ def add_exercise(data: Dict[str, Any]):
     return {"status": "ok", "key": key}
 
 
-@app.post("/exercise/delete")
+@app.post("/exercise/delete", dependencies=[Depends(verify_admin)])
 def delete_exercise(data: Dict[str, Any]):
     """Удаляет упражнение."""
     key = data.get("key", "").strip()
@@ -569,7 +585,7 @@ def delete_exercise(data: Dict[str, Any]):
 
     raise HTTPException(status_code=404, detail="Упражнение не найдено")
     
-@app.post("/intro/update")
+@app.post("/intro/update", dependencies=[Depends(verify_admin)])
 def update_intro(data: Dict[str, Any]):
     """Обновляет вводную тренировку."""
     workouts_data = load_data()
@@ -593,7 +609,7 @@ def update_intro(data: Dict[str, Any]):
     
     return {"status": "ok", "intro": intro} 
     
-@app.post("/exercise/rename")
+@app.post("/exercise/rename", dependencies=[Depends(verify_admin)])
 def rename_exercise(data: Dict[str, Any]):
     """Переименовывает упражнение."""
     key = data.get("key", "").strip()
@@ -775,7 +791,7 @@ def get_foods():
 
 INVENTORY_FILE = os.path.join(DATA_DIR, "inventory.json")
 
-@app.get("/inventory")
+@app.get("/inventory", dependencies=[Depends(verify_admin)])
 def get_inventory():
     return load_inventory()
 
@@ -789,7 +805,7 @@ class SetCurrentBlockRequest(BaseModel):
     block_id: int
 
 
-@app.post("/block/set_current")
+@app.post("/block/set_current", dependencies=[Depends(verify_admin)])
 async def set_current_block(req: SetCurrentBlockRequest):
     data = load_data()
     for b in data.get("blocks", []):
@@ -805,7 +821,7 @@ class BonusWorkoutRequest(BaseModel):
     audio_url: str = ""
 
 
-@app.post("/bonus/save")
+@app.post("/bonus/save", dependencies=[Depends(verify_admin)])
 async def save_bonus_workout(req: BonusWorkoutRequest):
     data = load_data()
     bonus = data.setdefault("bonus_workouts", [])
@@ -834,7 +850,7 @@ async def save_bonus_workout(req: BonusWorkoutRequest):
     return {"status": "ok"}
 
 
-@app.post("/bonus/delete")
+@app.post("/bonus/delete", dependencies=[Depends(verify_admin)])
 async def delete_bonus_workout(req: dict):
     data = load_data()
     bonus = data.get("bonus_workouts", [])
@@ -844,7 +860,7 @@ async def delete_bonus_workout(req: dict):
     save_data(data)
     return {"status": "ok"}    
 
-@app.delete("/user/{user_id}")
+@app.delete("/user/{user_id}", dependencies=[Depends(verify_admin)])
 def delete_user_endpoint(user_id: int):
     with users_lock:
         users_data = load_users()
@@ -856,7 +872,7 @@ def delete_user_endpoint(user_id: int):
     return {"status": "deleted"}
 
 
-@app.post("/user/{user_id}/reset_device")
+@app.post("/user/{user_id}/reset_device", dependencies=[Depends(verify_admin)])
 def reset_device(user_id: int):
     with users_lock:
         users_data = load_users()
