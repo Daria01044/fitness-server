@@ -5,3 +5,4 @@ httpx
 python-multipart
 imageio-ffmpeg
 psycopg2-binary
+supabase==2.27.1
