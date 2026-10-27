@@ -816,6 +816,8 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if len(content) > MAX_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"Файл больше {MAX_SIZE_MB} МБ")
 
+    thumb_public_url = None   # ← ДОБАВИТЬ ЭТО (сразу после проверки media_type)
+
     comments_dir = os.path.join(UPLOAD_DIR, "comments")
     os.makedirs(comments_dir, exist_ok=True)
 
@@ -860,43 +862,38 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
             print(f"[THUMB ERROR] {e}")
             thumb_filepath = None
 
-    # Загружаем в Supabase
+    # Загружаем видео/фото в Supabase
     with open(filepath, "rb") as f:
         file_bytes = f.read()
     
     filename_in_cloud = f"comments/{filename}"
     content_type = "video/mp4" if media_type == "video" else "image/jpeg"
     
-    print(f"[DEBUG] Перед вызовом upload_to_supabase: {filename_in_cloud}")   # ← ДОБАВИТЬ
+    print(f"[DEBUG] Перед вызовом upload_to_supabase: {filename_in_cloud}")
     public_url = upload_to_supabase(file_bytes, filename_in_cloud, content_type)
-    print(f"[DEBUG] После upload_to_supabase: public_url={public_url}")       # ← ДОБАВИТЬ
+    print(f"[DEBUG] После upload_to_supabase: public_url={public_url}")
     
     if public_url:
-        # Удаляем локальный файл (он больше не нужен)
         if os.path.exists(filepath):
             os.remove(filepath)
         url_path = public_url
     else:
         url_path = f"/uploads/comments/{filename}"
 
-    return {
-        "status": "ok",
-        "path": url_path,             # ссылка на видео
-        "thumb_path": thumb_public_url, # ссылка на обложку
-        "media_type": media_type,
-    }
-
-    # Загружаем видео в Supabase (этот код уже есть)
-    public_url = upload_to_supabase(...)
-    
-    # Загружаем обложку в Supabase
-    thumb_public_url = None
-    if thumb_filepath and os.path.exists(thumb_filepath):
+    # ← ЗАГРУЗКА ОБЛОЖКИ (ДО RETURN)
+    if media_type == "video" and thumb_filepath and os.path.exists(thumb_filepath):
         with open(thumb_filepath, "rb") as f:
             thumb_bytes = f.read()
         thumb_cloud_name = f"comments/{thumb_filename}"
         thumb_public_url = upload_to_supabase(thumb_bytes, thumb_cloud_name, "image/jpeg")
-        os.remove(thumb_filepath) # чистим диск    
+        os.remove(thumb_filepath)
+
+    return {                          # ← RETURN ПОСЛЕ ВСЕХ ЗАГРУЗОК
+        "status": "ok",
+        "path": url_path,
+        "thumb_path": thumb_public_url,
+        "media_type": media_type,
+    }
 
 @app.get("/uploads/{filename}")
 async def get_upload(filename: str):
