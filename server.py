@@ -681,6 +681,8 @@ async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
     # Если Supabase не сработал — сохраняем на диск
     if not public_url:
         filepath = os.path.join(UPLOAD_DIR, filename)
+        # Создаем папку, если её нет (для фолбэка)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)   # ← ДОБАВИТЬ ЭТО
         with open(filepath, "wb") as buffer:
             buffer.write(content)
         return {"status": "ok", "path": f"/uploads/{filename}"}
