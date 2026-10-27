@@ -21,6 +21,7 @@ from fastapi import Body
 
 # --- Ключ для защиты админских эндпоинтов ---
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "f7Kp2mQx9vN4bR8tL1wZ6yC3sH5jD0aE")
+ADMIN_PIN = "1221"  # ← Поменяйте на любой удобный 4-значный код
 
 PROTECTED_FIELDS = {"id", "device_id"}
 
@@ -346,6 +347,13 @@ def reject_payment(user_id: int):
 
     raise HTTPException(status_code=404, detail="User not found")
 
+@app.post("/admin/login")
+def admin_login(data: Dict[str, Any] = Body(...)):
+    """Проверяет PIN-код администратора."""
+    pin = data.get("pin", "")
+    if pin == ADMIN_PIN:
+        return {"status": "ok"}
+    raise HTTPException(status_code=403, detail="Неверный PIN-код")
 
 @app.post("/user/toggle_block")
 def toggle_block(user_id: int):
