@@ -37,7 +37,7 @@ else:
     print("[STORAGE] ВНИМАНИЕ: SUPABASE_URL/KEY не заданы, файлы будут на диске")
 
 def verify_admin(x_admin_key: str = Header(None)):
-    if x_admin_key != ADMIN_KEY:
+    if not ADMIN_KEY or not x_admin_key or not hmac.compare_digest(x_admin_key, ADMIN_KEY):
         raise HTTPException(status_code=403, detail="Forbidden: admin key required")
 
 PROTECTED_FIELDS = {"id", "device_id"}
@@ -237,7 +237,7 @@ def get_users():
 @app.post("/users")
 def update_users(users_data: Dict[str, Any], x_admin_key: Optional[str] = Header(None)):
     """Обновляет список пользователей (полная перезапись). Требует ключ."""
-    if x_admin_key != ADMIN_KEY:
+    if not is_admin_request(x_admin_key):
         raise HTTPException(status_code=403, detail="Forbidden")
     save_users(users_data)
     return {"status": "ok"}
@@ -293,7 +293,9 @@ def register_user(user: UserData):
 ADMIN_ONLY_FIELDS = {"is_active", "payment_due_date", "last_payment_date", "start_date"}
 
 def is_admin_request(key):
-    return bool(ADMIN_KEY) and key == ADMIN_KEY
+    if not ADMIN_KEY or not key:
+        return False
+    return hmac.compare_digest(key, ADMIN_KEY)
 
 ADMIN_ONLY_FIELDS = {"is_active", "payment_due_date", "last_payment_date", "start_date"}
 
@@ -306,7 +308,7 @@ def update_user(
     if uid is None:
         raise HTTPException(status_code=400, detail="id required")
 
-    is_admin = (x_admin_key == ADMIN_KEY)
+    is_admin = is_admin_request(x_admin_key)
 
     with users_lock:
         users_data = load_users()
@@ -775,21 +777,6 @@ def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
         public_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
         print(f"[STORAGE OK] {public_url}")
         return public_url
-    except Exception as e:
-        print(f"[STORAGE ERROR] {e}")
-        return None
-        
-def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
-    """Загружает файл в Supabase Storage и возвращает публичный URL."""
-    if not supabase:
-        return None
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET).upload(
-            path=filename,
-            file=file_bytes,
-            file_options={"content-type": content_type, "upsert": "true"}
-        )
-        return supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
     except Exception as e:
         print(f"[STORAGE ERROR] {e}")
         return None
