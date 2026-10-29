@@ -220,10 +220,23 @@ def get_data():
     return load_data()
 
 
+PUBLIC_USER_FIELDS = (
+    "id", "first_name", "last_name",
+    "done", "comments", "comments_list", "reactions", "profile_photo",
+)
+
 @app.get("/users")
-def get_users():
-    """Отдаёт всех пользователей."""
-    return load_users()
+def get_users(x_admin_key: Optional[str] = Header(None)):
+    """Админу отдаёт всё, остальным только то, что нужно рейтингу и комментариям."""
+    data = load_users()
+    if is_admin_request(x_admin_key):
+        return data
+    return {
+        "users": [
+            {k: u[k] for k in PUBLIC_USER_FIELDS if k in u}
+            for u in data.get("users", [])
+        ]
+    }
 
 
 @app.post("/users")
@@ -289,10 +302,29 @@ def is_admin_request(key):
         return False
     return hmac.compare_digest(key, ADMIN_KEY)
 
+def device_ok(u, x_device_id):
+    return bool(x_device_id) and u.get("device_id") == x_device_id
+
+def require_user_device(user_id, x_device_id, x_admin_key):
+    """Загрузка файлов разрешена только с устройства самой ученицы (или админу)."""
+    if is_admin_request(x_admin_key):
+        return
+    with users_lock:
+        users_data = load_users()
+    for u in users_data["users"]:
+        if u["id"] == user_id:
+            if device_ok(u, x_device_id):
+                return
+            raise HTTPException(status_code=403, detail="Device mismatch")
+    raise HTTPException(status_code=404, detail="User not found")
+
+_login_fails = {"count": 0, "until": 0.0}
+
 @app.post("/user/update")
 def update_user(
     payload: Dict[str, Any] = Body(...),
-    x_admin_key: Optional[str] = Header(None)
+    x_admin_key: Optional[str] = Header(None),
+    x_device_id: Optional[str] = Header(None),
 ):
     uid = payload.get("id")
     if uid is None:
@@ -304,11 +336,11 @@ def update_user(
         users_data = load_users()
         for u in users_data["users"]:
             if u["id"] == uid:
+                if not is_admin and not device_ok(u, x_device_id):
+                    raise HTTPException(status_code=403, detail="Device mismatch")
                 for k, v in payload.items():
-                    # Защищенные поля: id, device_id — никогда
                     if k in PROTECTED_FIELDS:
                         continue
-                    # Админские поля: только с ключом
                     if k in ADMIN_ONLY_FIELDS and not is_admin:
                         continue
                     u[k] = v
@@ -316,12 +348,6 @@ def update_user(
                 return {"status": "ok", "user": u}
 
     raise HTTPException(status_code=404, detail="User not found")
-
-_login_fails = {"count": 0, "until": 0.0}
-
-def device_ok(u, x_device_id):
-    return bool(x_device_id) and u.get("device_id") == x_device_id
-
 
 @app.get("/user/me")
 def get_me(
@@ -579,8 +605,13 @@ def rename_exercise(data: Dict[str, Any]):
 
 
 @app.post("/upload/profile_photo")
-async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
-    """Загружает фото профиля (в Supabase Storage, с фолбэком на диск)."""
+async def upload_profile_photo(
+    file: UploadFile = File(...),
+    user_id: int = 0,
+    x_device_id: Optional[str] = Header(None),
+    x_admin_key: Optional[str] = Header(None),
+):
+    require_user_device(user_id, x_device_id, x_admin_key)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Нет файла")
     
@@ -614,7 +645,7 @@ async def upload_profile_photo(file: UploadFile = File(...), user_id: int = 0):
     if not public_url:
         filepath = os.path.join(UPLOAD_DIR, filename)
         # Создаем папку, если её нет (для фолбэка)
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)   # ← ДОБАВИТЬ ЭТО
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "wb") as buffer:
             buffer.write(content)
         return {"status": "ok", "path": f"/uploads/{filename}"}
@@ -711,7 +742,13 @@ def upload_to_supabase(file_bytes: bytes, filename: str, content_type: str):
 
 
 @app.post("/upload/comment_media")
-async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
+async def upload_comment_media(
+    file: UploadFile = File(...),
+    user_id: int = 0,
+    x_device_id: Optional[str] = Header(None),
+    x_admin_key: Optional[str] = Header(None),
+):
+    require_user_device(user_id, x_device_id, x_admin_key)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Нет файла")
 
@@ -731,7 +768,7 @@ async def upload_comment_media(file: UploadFile = File(...), user_id: int = 0):
     if len(content) > MAX_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=400, detail=f"Файл больше {MAX_SIZE_MB} МБ")
 
-    thumb_public_url = None   # ← ДОБАВИТЬ ЭТО (сразу после проверки media_type)
+    thumb_public_url = None
 
     comments_dir = os.path.join(UPLOAD_DIR, "comments")
     os.makedirs(comments_dir, exist_ok=True)
