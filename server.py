@@ -958,3 +958,58 @@ def reset_device(user_id: int):
                 return {"status": "ok"}
     raise HTTPException(status_code=404, detail="User not found")
     
+# --- Чат ---
+
+@app.get("/chat/messages")
+def get_chat_messages(chat_type: str = "general", user_id: int = 0):
+    """Возвращает сообщения (общий чат или личный с тренером)."""
+    # chat_type: "general" (общий) или "trainer_{user_id}" (с тренером)
+    chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{user_id}"
+    data = store_load(chat_key, {"messages": []})
+    return data
+
+@app.post("/chat/send")
+def send_chat_message(
+    payload: Dict[str, Any] = Body(...),
+    x_device_id: Optional[str] = Header(None),
+    x_admin_key: Optional[str] = Header(None),
+):
+    """Отправляет сообщение в чат."""
+    chat_type = payload.get("chat_type", "general")
+    user_id = payload.get("user_id", 0)
+    text = payload.get("text", "").strip()
+    sender_name = payload.get("sender_name", "Аноним")
+    
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+
+    # Проверка устройства (чтобы нельзя было писать от чужого имени)
+    if not is_admin_request(x_admin_key):
+        with users_lock:
+            users_data = load_users()
+        found = False
+        for u in users_data["users"]:
+            if u["id"] == user_id and device_ok(u, x_device_id):
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=403, detail="Device mismatch")
+
+    chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{user_id}"
+    data = store_load(chat_key, {"messages": []})
+    messages = data.get("messages", [])
+    
+    messages.append({
+        "user_id": user_id,
+        "sender_name": sender_name,
+        "text": text,
+        "timestamp": datetime.now().isoformat(),
+    })
+    
+    # Ограничиваем историю (последние 100 сообщений)
+    if len(messages) > 100:
+        messages = messages[-100:]
+        
+    data["messages"] = messages
+    store_save(chat_key, data)
+    return {"status": "ok"}    
