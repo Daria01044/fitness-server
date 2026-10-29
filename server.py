@@ -1006,6 +1006,7 @@ def send_chat_message(
         "text": text,
         "media_path": media_path,
         "media_type": media_type,
+        "thumb_path": thumb_path,   # ← ДОБАВИТЬ ЭТО
         "timestamp": datetime.now().strftime("%H:%M"),   
         "date": datetime.now().strftime("%d.%m.%Y"),  
     })
