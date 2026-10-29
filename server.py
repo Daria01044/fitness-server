@@ -997,6 +997,7 @@ def send_chat_message(
     chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{user_id}"
     data = store_load(chat_key, {"messages": []})
     messages = data.get("messages", [])
+    thumb_path = payload.get("thumb_path", "")
     
     messages.append({
         "id": str(uuid.uuid4()),
