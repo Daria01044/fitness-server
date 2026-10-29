@@ -1083,3 +1083,26 @@ def delete_chat_message(
     data["messages"] = messages
     store_save(chat_key, data)
     return {"status": "ok"} 
+    
+@app.get("/chat/trainer_chats", dependencies=[Depends(verify_admin)])
+def get_trainer_chats():
+    """Отдаёт список учениц, у которых есть чат с тренером."""
+    with users_lock:
+        users_data = load_users()
+    
+    chats = []
+    for u in users_data["users"]:
+        chat_key = f"chat_trainer_{u['id']}"
+        data = store_load(chat_key, {"messages": []})
+        messages = data.get("messages", [])
+        if messages:
+            last_msg = messages[-1]
+            chats.append({
+                "user_id": u["id"],
+                "name": f"{u['first_name']} {u['last_name']}",
+                "last_text": last_msg.get("text", "")[:30] + ("..." if len(last_msg.get("text", "")) > 30 else ""),
+                "timestamp": last_msg.get("timestamp", ""),
+            })
+    # Сортируем по времени (новые сверху)
+    chats.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return {"chats": chats}    
