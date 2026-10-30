@@ -1015,9 +1015,11 @@ def send_chat_message(
         "text": text,
         "media_path": media_path,
         "media_type": media_type,
-        "thumb_path": thumb_path,   # ← ДОБАВИТЬ ЭТО
-        "timestamp": datetime.now().strftime("%H:%M"),   
-        "date": datetime.now().strftime("%d.%m.%Y"),  
+        "thumb_path": thumb_path,
+        "reply_to": payload.get("reply_to", None),   # ← ДОБАВИТЬ: ID сообщения, на которое отвечаем
+        "reactions": {},                              # ← ДОБАВИТЬ: словарь для реакций {user_id: emoji}
+        "timestamp": datetime.now().strftime("%H:%M"),
+        "date": datetime.now().strftime("%d.%m.%Y"),
     })
     
     if len(messages) > 100: messages = messages[-100:]
@@ -1126,3 +1128,46 @@ def get_trainer_chats():
     # Сортируем: сначала те, у кого есть сообщения (по времени), потом остальные (по имени)
     chats.sort(key=lambda x: (x["timestamp"] == "", x["timestamp"]), reverse=True)
     return {"chats": chats}
+    
+@app.post("/chat/react")
+def react_to_message(
+    payload: Dict[str, Any] = Body(...),
+    x_device_id: Optional[str] = Header(None),
+    x_admin_key: Optional[str] = Header(None),
+):
+    chat_type = payload.get("chat_type", "general")
+    user_id = payload.get("user_id", 0)
+    msg_id = payload.get("id")
+    emoji = payload.get("emoji", "")
+    
+    if not msg_id or not emoji:
+        raise HTTPException(status_code=400, detail="Нужен ID и эмодзи")
+
+    if not is_admin_request(x_admin_key):
+        with users_lock:
+            users_data = load_users()
+        found = False
+        for u in users_data["users"]:
+            if u["id"] == user_id and device_ok(u, x_device_id):
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=403, detail="Device mismatch")
+
+    chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{user_id}"
+    data = store_load(chat_key, {"messages": []})
+    messages = data.get("messages", [])
+    
+    for m in messages:
+        if m.get("id") == msg_id:
+            reactions = m.setdefault("reactions", {})
+            # Если уже стоит эта реакция — убираем, иначе ставим
+            if reactions.get(str(user_id)) == emoji:
+                del reactions[str(user_id)]
+            else:
+                reactions[str(user_id)] = emoji
+            break
+            
+    data["messages"] = messages
+    store_save(chat_key, data)
+    return {"status": "ok"}    
