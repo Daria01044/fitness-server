@@ -988,6 +988,8 @@ def send_chat_message(
     sender_name = payload.get("sender_name", "Аноним")
     media_path = payload.get("media_path", "")
     media_type = payload.get("media_type", "")
+    media_thumb = payload.get("thumb_path", "")
+    forwarded = payload.get("forwarded", False)  # ← ДОБАВИТЬ
     
     if not text and not media_path:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
