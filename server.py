@@ -1097,7 +1097,7 @@ def delete_chat_message(
     
 @app.get("/chat/trainer_chats", dependencies=[Depends(verify_admin)])
 def get_trainer_chats():
-    """Отдаёт список учениц, у которых есть чат с тренером."""
+    """Отдаёт список всех учениц для чата с тренером."""
     with users_lock:
         users_data = load_users()
     
@@ -1106,15 +1106,23 @@ def get_trainer_chats():
         chat_key = f"chat_trainer_{u['id']}"
         data = store_load(chat_key, {"messages": []})
         messages = data.get("messages", [])
+        
+        last_text = ""
+        timestamp = ""
         if messages:
             last_msg = messages[-1]
-            chats.append({
-                "user_id": u["id"],
-                "name": f"{u['first_name']} {u['last_name']}",
-                "last_text": last_msg.get("text", "")[:30] + ("..." if len(last_msg.get("text", "")) > 30 else ""),
-                "timestamp": last_msg.get("timestamp", ""),
-            })
-    # Сортируем по времени (новые сверху)
-    chats.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    return {"chats": chats}    
-       
+            last_text = last_msg.get("text", "") or ("[Медиа]" if last_msg.get("media_path") else "")
+            if len(last_text) > 30:
+                last_text = last_text[:30] + "..."
+            timestamp = last_msg.get("date", "") + " " + last_msg.get("timestamp", "")
+        
+        chats.append({
+            "user_id": u["id"],
+            "name": f"{u['first_name']} {u['last_name']}",
+            "last_text": last_text or "Нет сообщений",
+            "timestamp": timestamp,
+        })
+    
+    # Сортируем: сначала те, у кого есть сообщения (по времени), потом остальные (по имени)
+    chats.sort(key=lambda x: (x["timestamp"] == "", x["timestamp"]), reverse=True)
+    return {"chats": chats}
