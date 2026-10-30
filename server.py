@@ -4,6 +4,7 @@ from typing import List, Optional, Dict, Any
 from supabase import create_client, Client
 import json
 import os
+import copy
 import psycopg2
 import shutil
 import subprocess
@@ -106,19 +107,27 @@ def _file_path(name):
     return os.path.join(DATA_DIR, f"{name}.json")
 
 
+_cache = {}
+
 def store_load(name, default):
     if USE_DB:
-        return kv_get(name, default)
+        if name in _cache:
+            return copy.deepcopy(_cache[name])
+        value = kv_get(name, None)
+        if value is None:
+            return default
+        _cache[name] = value
+        return copy.deepcopy(value)
     path = _file_path(name)
     if not os.path.exists(path):
         return default
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
 def store_save(name, value):
     if USE_DB:
         kv_set(name, value)
+        _cache[name] = copy.deepcopy(value)
         return
     tmp = _file_path(name) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -1108,3 +1117,4 @@ def get_trainer_chats():
     # Сортируем по времени (новые сверху)
     chats.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return {"chats": chats}    
+       
