@@ -330,7 +330,7 @@ def require_user_device(user_id, x_device_id, x_admin_key):
     raise HTTPException(status_code=404, detail="User not found")
 
 _login_fails = {"count": 0, "until": 0.0}
-
+    
 @app.post("/user/update")
 def update_user(
     payload: Dict[str, Any] = Body(...),
@@ -622,12 +622,16 @@ async def upload_profile_photo(
     x_device_id: Optional[str] = Header(None),
     x_admin_key: Optional[str] = Header(None),
 ):
-    require_user_device(user_id, x_device_id, x_admin_key)
+    # Если это не админ — проверяем устройство
+    if not is_admin_request(x_admin_key):
+        require_user_device(user_id, x_device_id, x_admin_key)
+        
     if not file.filename:
         raise HTTPException(status_code=400, detail="Нет файла")
     
     ext = os.path.splitext(file.filename)[1] or ".jpg"
-    filename = f"profiles/user_{user_id}{ext}"
+    # Для Ламии (user_id=0) используем специальное имя
+    filename = f"profiles/user_{user_id}{ext}" if user_id != 0 else "profiles/admin.jpg"
     content = await file.read()
     
     # Пытаемся загрузить в Supabase
@@ -643,19 +647,19 @@ async def upload_profile_photo(
         except Exception as e:
             print(f"[STORAGE ERROR] upload_profile_photo: {e}")
     
-    # Обновляем пользователя (сохраняем либо полный URL, либо локальный путь)
-    with users_lock:
-        users_data = load_users()
-        for u in users_data["users"]:
-            if u["id"] == user_id:
-                u["profile_photo"] = public_url if public_url else f"/uploads/{filename}"
-                break
-        save_users(users_data)
+    # Обновляем пользователя (только если это не Ламия, т.е. user_id != 0)
+    if user_id != 0:
+        with users_lock:
+            users_data = load_users()
+            for u in users_data["users"]:
+                if u["id"] == user_id:
+                    u["profile_photo"] = public_url if public_url else f"/uploads/{filename}"
+                    break
+            save_users(users_data)
     
     # Если Supabase не сработал — сохраняем на диск
     if not public_url:
         filepath = os.path.join(UPLOAD_DIR, filename)
-        # Создаем папку, если её нет (для фолбэка)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "wb") as buffer:
             buffer.write(content)
