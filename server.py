@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import Body
+from datetime import timezone, timedelta
 
 ADMIN_KEY = os.environ.get("ADMIN_KEY")
 ADMIN_PIN = os.environ.get("ADMIN_PIN")
@@ -989,8 +990,12 @@ def send_chat_message(
     media_path = payload.get("media_path", "")
     media_type = payload.get("media_type", "")
     media_thumb = payload.get("thumb_path", "")
-    forwarded = payload.get("forwarded", False)  # ← ДОБАВИТЬ
+    forwarded = payload.get("forwarded", False)
     
+    # --- ИСПРАВЛЕНИЕ 1: Если это Ламия, то user_id = 0 ---
+    if sender_name == "Ламия":
+        user_id = 0
+
     if not text and not media_path:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
 
@@ -1010,6 +1015,9 @@ def send_chat_message(
     messages = data.get("messages", [])
     thumb_path = payload.get("thumb_path", "")
     
+    # --- ИСПРАВЛЕНИЕ 2: Время по Москве (UTC+3) ---
+    msk_time = datetime.now(timezone(timedelta(hours=3)))
+    
     messages.append({
         "id": str(uuid.uuid4()),
         "user_id": user_id,
@@ -1018,10 +1026,10 @@ def send_chat_message(
         "media_path": media_path,
         "media_type": media_type,
         "thumb_path": thumb_path,
-        "reply_to": payload.get("reply_to", None),   # ← ДОБАВИТЬ: ID сообщения, на которое отвечаем
-        "reactions": {},                              # ← ДОБАВИТЬ: словарь для реакций {user_id: emoji}
-        "timestamp": datetime.now().strftime("%H:%M"),
-        "date": datetime.now().strftime("%d.%m.%Y"),
+        "reply_to": payload.get("reply_to", None),
+        "reactions": {},
+        "timestamp": msk_time.strftime("%H:%M"),   # ← Время по Москве
+        "date": msk_time.strftime("%d.%m.%Y"),     # ← Дата по Москве
     })
     
     if len(messages) > 100: messages = messages[-100:]
