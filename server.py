@@ -984,43 +984,45 @@ def send_chat_message(
     x_admin_key: Optional[str] = Header(None),
 ):
     chat_type = payload.get("chat_type", "general")
-    user_id = payload.get("user_id", 0)
+    original_user_id = payload.get("user_id", 0) # ← ID ученицы (для chat_key)
     text = payload.get("text", "").strip()
     sender_name = payload.get("sender_name", "Аноним")
     media_path = payload.get("media_path", "")
     media_type = payload.get("media_type", "")
-    media_thumb = payload.get("thumb_path", "")
-    forwarded = payload.get("forwarded", False)
+    thumb_path = payload.get("thumb_path", "")
     
-    # --- ИСПРАВЛЕНИЕ 1: Если это Ламия, то user_id = 0 ---
-    if sender_name == "Ламия":
-        user_id = 0
-
     if not text and not media_path:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
 
+    # 1. Проверка прав (используем original_user_id, пока он не изменён)
     if not is_admin_request(x_admin_key):
         with users_lock:
             users_data = load_users()
         found = False
         for u in users_data["users"]:
-            if u["id"] == user_id and device_ok(u, x_device_id):
+            if u["id"] == original_user_id and device_ok(u, x_device_id):
                 found = True
                 break
         if not found:
             raise HTTPException(status_code=403, detail="Device mismatch")
 
-    chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{user_id}"
+    # 2. Формируем chat_key ДО того, как изменить user_id
+    chat_key = "chat_general" if chat_type == "general" else f"chat_trainer_{original_user_id}"
+    
+    # 3. Теперь определяем user_id для сохранения в сообщении
+    msg_user_id = original_user_id
+    if sender_name == "Ламия":
+        msg_user_id = 0  # Для отображения "своих" сообщений у Ламии
+
     data = store_load(chat_key, {"messages": []})
     messages = data.get("messages", [])
-    thumb_path = payload.get("thumb_path", "")
     
-    # --- ИСПРАВЛЕНИЕ 2: Время по Москве (UTC+3) ---
+    # 4. Время по Москве
     msk_time = datetime.now(timezone(timedelta(hours=3)))
     
     messages.append({
         "id": str(uuid.uuid4()),
-        "user_id": user_id,
+        "user_id": msg_user_id,      # ← 0 для Ламии, ID ученицы для ученицы
         "sender_name": sender_name,
         "text": text,
         "media_path": media_path,
@@ -1028,11 +1030,13 @@ def send_chat_message(
         "thumb_path": thumb_path,
         "reply_to": payload.get("reply_to", None),
         "reactions": {},
-        "timestamp": msk_time.strftime("%H:%M"),   # ← Время по Москве
-        "date": msk_time.strftime("%d.%m.%Y"),     # ← Дата по Москве
+        "timestamp": msk_time.strftime("%H:%M"),
+        "date": msk_time.strftime("%d.%m.%Y"),
     })
     
-    if len(messages) > 100: messages = messages[-100:]
+    if len(messages) > 100: 
+        messages = messages[-100:]
+        
     data["messages"] = messages
     store_save(chat_key, data)
     return {"status": "ok"}
