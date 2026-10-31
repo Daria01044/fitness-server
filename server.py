@@ -656,6 +656,33 @@ async def upload_profile_photo(
                     u["profile_photo"] = public_url if public_url else f"/uploads/{filename}"
                     break
             save_users(users_data)
+
+    # Если это Ламия (user_id=0) — сохраняем её фото в базу как специальную запись
+    if user_id == 0:
+        with users_lock:
+            users_data = load_users()
+            # Ищем или создаём запись для Ламии
+            admin_entry = None
+            for u in users_data["users"]:
+                if u["id"] == 0:
+                    admin_entry = u
+                    break
+            if not admin_entry:
+                admin_entry = {
+                    "id": 0,
+                    "first_name": "Ламия",
+                    "last_name": "кызы Бабаева",
+                    "level": None,
+                    "intro_done": True,
+                    "done": {},
+                    "comments": {},
+                    "done_dates": {},
+                    "is_active": True,
+                }
+                users_data["users"].append(admin_entry)
+            
+            admin_entry["profile_photo"] = public_url if public_url else f"/uploads/{filename}"
+            save_users(users_data)
     
     # Если Supabase не сработал — сохраняем на диск
     if not public_url:
